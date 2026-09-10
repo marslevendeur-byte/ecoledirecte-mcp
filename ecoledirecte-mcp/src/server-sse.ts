@@ -1,5 +1,4 @@
 import express from "express";
-import { randomUUID } from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
@@ -21,8 +20,7 @@ app.use(express.json());
 
 const PORT = parseInt(process.env.PORT ?? "3000", 10);
 
-// ── Stockage des transports par session ───────────────────────────────────────
-const httpTransports = new Map<string, StreamableHTTPServerTransport>();
+// SSE legacy transports
 const sseTransports = new Map<string, SSEServerTransport>();
 
 // ── Factory MCP server ────────────────────────────────────────────────────────
@@ -118,53 +116,30 @@ function createMcpServer(): McpServer {
   return server;
 }
 
-// ── HTTP Streamable (nouveau protocole — claude.ai) ───────────────────────────
+// ── HTTP Streamable STATELESS (nouveau protocole — claude.ai) ─────────────────
+// Mode stateless : un nouveau transport + server par requête POST
+// Pas de gestion de session → compatible avec claude.ai
 app.post("/mcp", async (req, res) => {
-  const sessionId = req.headers["mcp-session-id"] as string | undefined;
-
-  let transport: StreamableHTTPServerTransport;
-
-  if (sessionId && httpTransports.has(sessionId)) {
-    transport = httpTransports.get(sessionId)!;
-  } else {
-    // Nouvelle session
-    transport = new StreamableHTTPServerTransport({
-      sessionIdGenerator: () => randomUUID(),
-    });
-    const server = createMcpServer();
-    await server.connect(transport);
-
-    transport.onclose = () => {
-      if (transport.sessionId) httpTransports.delete(transport.sessionId);
-    };
-
-    if (transport.sessionId) {
-      httpTransports.set(transport.sessionId, transport);
-    }
-  }
-
+  const transport = new StreamableHTTPServerTransport({
+    sessionIdGenerator: undefined, // stateless
+  });
+  const server = createMcpServer();
+  await server.connect(transport);
   await transport.handleRequest(req, res, req.body);
+  // Nettoyage après réponse
+  res.on("finish", () => server.close());
 });
 
-app.get("/mcp", async (req, res) => {
-  const sessionId = req.headers["mcp-session-id"] as string | undefined;
-  if (!sessionId || !httpTransports.has(sessionId)) {
-    res.status(400).json({ error: "Session ID manquant ou invalide" });
-    return;
-  }
-  await httpTransports.get(sessionId)!.handleRequest(req, res);
+// GET et DELETE non nécessaires en stateless mais on les garde pour compatibilité
+app.get("/mcp", (_req, res) => {
+  res.status(405).json({ error: "Utilisez POST /mcp" });
 });
 
-app.delete("/mcp", async (req, res) => {
-  const sessionId = req.headers["mcp-session-id"] as string | undefined;
-  if (sessionId && httpTransports.has(sessionId)) {
-    await httpTransports.get(sessionId)!.close();
-    httpTransports.delete(sessionId);
-  }
+app.delete("/mcp", (_req, res) => {
   res.status(200).end();
 });
 
-// ── SSE legacy (ancien protocole — compatibilité) ─────────────────────────────
+// ── SSE legacy (ancien protocole) ────────────────────────────────────────────
 app.get("/sse", async (req, res) => {
   const server = createMcpServer();
   const transport = new SSEServerTransport("/messages", res);
@@ -190,6 +165,6 @@ app.get("/health", (_req, res) => {
 
 app.listen(PORT, () => {
   console.log(`🚀 EcoleDirecte MCP server sur http://0.0.0.0:${PORT}`);
-  console.log(`   HTTP Streamable : POST/GET/DELETE /mcp`);
-  console.log(`   SSE legacy      : GET /sse`);
+  console.log(`   HTTP Streamable (stateless) : POST /mcp`);
+  console.log(`   SSE legacy                  : GET /sse`);
 });
