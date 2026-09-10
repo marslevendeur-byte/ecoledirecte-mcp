@@ -1,5 +1,7 @@
 import express from "express";
+import { randomUUID } from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import { z } from "zod";
 import {
@@ -19,9 +21,11 @@ app.use(express.json());
 
 const PORT = parseInt(process.env.PORT ?? "3000", 10);
 
-// Stocke les transports actifs par session
-const transports = new Map<string, SSEServerTransport>();
+// ── Stockage des transports par session ───────────────────────────────────────
+const httpTransports = new Map<string, StreamableHTTPServerTransport>();
+const sseTransports = new Map<string, SSEServerTransport>();
 
+// ── Factory MCP server ────────────────────────────────────────────────────────
 function createMcpServer(): McpServer {
   const server = new McpServer({
     name: "ecoledirecte-mcp",
@@ -114,26 +118,66 @@ function createMcpServer(): McpServer {
   return server;
 }
 
-// ── SSE endpoint ─────────────────────────────────────────────────────────────
+// ── HTTP Streamable (nouveau protocole — claude.ai) ───────────────────────────
+app.post("/mcp", async (req, res) => {
+  const sessionId = req.headers["mcp-session-id"] as string | undefined;
+
+  let transport: StreamableHTTPServerTransport;
+
+  if (sessionId && httpTransports.has(sessionId)) {
+    transport = httpTransports.get(sessionId)!;
+  } else {
+    // Nouvelle session
+    transport = new StreamableHTTPServerTransport({
+      sessionIdGenerator: () => randomUUID(),
+    });
+    const server = createMcpServer();
+    await server.connect(transport);
+
+    transport.onclose = () => {
+      if (transport.sessionId) httpTransports.delete(transport.sessionId);
+    };
+
+    if (transport.sessionId) {
+      httpTransports.set(transport.sessionId, transport);
+    }
+  }
+
+  await transport.handleRequest(req, res, req.body);
+});
+
+app.get("/mcp", async (req, res) => {
+  const sessionId = req.headers["mcp-session-id"] as string | undefined;
+  if (!sessionId || !httpTransports.has(sessionId)) {
+    res.status(400).json({ error: "Session ID manquant ou invalide" });
+    return;
+  }
+  await httpTransports.get(sessionId)!.handleRequest(req, res);
+});
+
+app.delete("/mcp", async (req, res) => {
+  const sessionId = req.headers["mcp-session-id"] as string | undefined;
+  if (sessionId && httpTransports.has(sessionId)) {
+    await httpTransports.get(sessionId)!.close();
+    httpTransports.delete(sessionId);
+  }
+  res.status(200).end();
+});
+
+// ── SSE legacy (ancien protocole — compatibilité) ─────────────────────────────
 app.get("/sse", async (req, res) => {
   const server = createMcpServer();
   const transport = new SSEServerTransport("/messages", res);
-  const sessionId = transport.sessionId;
-  transports.set(sessionId, transport);
-
-  res.on("close", () => {
-    transports.delete(sessionId);
-  });
-
+  sseTransports.set(transport.sessionId, transport);
+  res.on("close", () => sseTransports.delete(transport.sessionId));
   await server.connect(transport);
 });
 
-// ── Messages endpoint ─────────────────────────────────────────────────────────
 app.post("/messages", async (req, res) => {
   const sessionId = req.query.sessionId as string;
-  const transport = transports.get(sessionId);
+  const transport = sseTransports.get(sessionId);
   if (!transport) {
-    res.status(404).json({ error: "Session not found" });
+    res.status(404).json({ error: "Session introuvable" });
     return;
   }
   await transport.handlePostMessage(req, res);
@@ -145,6 +189,7 @@ app.get("/health", (_req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`🚀 EcoleDirecte MCP SSE server sur http://0.0.0.0:${PORT}`);
-  console.log(`   SSE endpoint: http://0.0.0.0:${PORT}/sse`);
+  console.log(`🚀 EcoleDirecte MCP server sur http://0.0.0.0:${PORT}`);
+  console.log(`   HTTP Streamable : POST/GET/DELETE /mcp`);
+  console.log(`   SSE legacy      : GET /sse`);
 });
