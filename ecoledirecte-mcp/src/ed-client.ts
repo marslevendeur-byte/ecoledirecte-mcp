@@ -1,9 +1,9 @@
-import fetch, { type RequestInit } from "node-fetch";
+import fetch from "node-fetch";
 
 const BASE_URL = "https://api.ecoledirecte.com";
-const API_VERSION = "4.75.0";
+const API_VERSION = "7.14.3";
 const USER_AGENT =
-  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+  "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36";
 
 export interface Session {
   token: string;
@@ -20,7 +20,7 @@ export interface EDResponse<T = unknown> {
   data: T;
 }
 
-// ── Auth state (in-memory, persist via env fallback) ────────────────────────
+// ── Auth state (in-memory) ───────────────────────────────────────────────────
 let _session: Session | null = null;
 
 export function getSession(): Session | null {
@@ -32,28 +32,32 @@ export function clearSession(): void {
 }
 
 // ── Cookie helpers ───────────────────────────────────────────────────────────
-function extractCookie(setCookieHeader: string[], name: string): string {
-  for (const header of setCookieHeader) {
+function extractCookie(setCookieHeaders: string[], name: string): string {
+  for (const header of setCookieHeaders) {
     const match = header.match(new RegExp(`${name}=([^;]+)`));
     if (match) return match[1];
   }
   return "";
 }
 
-// ── Bootstrap GTK ────────────────────────────────────────────────────────────
+// ── Bootstrap GTK (optionnel) ────────────────────────────────────────────────
 async function fetchGTK(): Promise<string> {
-  const res = await fetch(
-    `${BASE_URL}/v3/login.awp?gtk=1&v=${API_VERSION}`,
-    {
-      method: "GET",
-      headers: { "User-Agent": USER_AGENT },
-      redirect: "follow",
-    }
-  );
-  const setCookies = res.headers.raw()["set-cookie"] ?? [];
-  const gtk = extractCookie(setCookies, "GTK");
-  if (!gtk) throw new Error("Impossible de récupérer le cookie GTK");
-  return gtk;
+  try {
+    const res = await fetch(
+      `${BASE_URL}/v3/login.awp?gtk=1&v=${API_VERSION}`,
+      {
+        method: "GET",
+        headers: { "User-Agent": USER_AGENT },
+        redirect: "follow",
+      }
+    );
+    // node-fetch expose raw() sur les headers
+    const raw = (res.headers as unknown as { raw(): Record<string, string[]> }).raw();
+    const setCookies = raw["set-cookie"] ?? [];
+    return extractCookie(setCookies, "GTK");
+  } catch {
+    return "";
+  }
 }
 
 // ── Login ────────────────────────────────────────────────────────────────────
@@ -72,17 +76,19 @@ export async function login(
   };
   if (fa && fa.length > 0) body.fa = fa;
 
-  const encodedBody = `data=${encodeURIComponent(JSON.stringify(body))}`;
+  const headers: Record<string, string> = {
+    "Content-Type": "application/x-www-form-urlencoded",
+    "User-Agent": USER_AGENT,
+  };
+  if (gtk) {
+    headers["X-Gtk"] = gtk;
+    headers["Cookie"] = `GTK=${gtk}`;
+  }
 
   const res = await fetch(`${BASE_URL}/v3/login.awp?v=${API_VERSION}`, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/x-www-form-urlencoded",
-      "User-Agent": USER_AGENT,
-      "X-Gtk": gtk,
-      Cookie: `GTK=${gtk}`,
-    },
-    body: encodedBody,
+    headers,
+    body: `data=${encodeURIComponent(JSON.stringify(body))}`,
   });
 
   const json = (await res.json()) as EDResponse<{
@@ -91,11 +97,9 @@ export async function login(
       prenom: string;
       nom: string;
       profile?: { classe?: { libelle?: string } };
-      token?: string;
     }>;
     question?: string;
     propositions?: string[];
-    totp?: boolean;
   }>;
 
   // Double auth requise
@@ -113,13 +117,16 @@ export async function login(
   }
 
   if (json.code === 505) throw new Error("Identifiant ou mot de passe invalide");
-  if (json.code !== 200) throw new Error(`Erreur EcoleDirecte: ${json.message ?? json.code}`);
+  if (json.code !== 200) throw new Error(`Erreur EcoleDirecte ${json.code}: ${json.message ?? "inconnue"}`);
 
   const account = json.data?.accounts?.[0];
   if (!account) throw new Error("Aucun compte trouvé dans la réponse");
 
+  // BUG FIX : le token est à la racine du JSON, pas dans account
+  if (!json.token) throw new Error("Token absent de la réponse de login");
+
   _session = {
-    token: json.token!,
+    token: json.token,
     studentId: account.id,
     studentName: `${account.prenom} ${account.nom}`,
     className: account.profile?.classe?.libelle ?? "Classe inconnue",
@@ -129,77 +136,33 @@ export async function login(
   return { session: _session, needDoubleAuth: false };
 }
 
-// ── Double auth (QCM) ────────────────────────────────────────────────────────
-export async function submitDoubleAuth(
-  identifiant: string,
-  motdepasse: string,
-  choix: string,
-  gtk: string,
-  tempToken: string
-): Promise<Session> {
-  // 1. GET la question
-  const getRes = await fetch(
-    `${BASE_URL}/v3/connexion/doubleauth.awp?verbe=get&v=${API_VERSION}`,
-    {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/x-www-form-urlencoded",
-        "User-Agent": USER_AGENT,
-        "X-Token": tempToken,
-        Cookie: `GTK=${gtk}`,
-      },
-      body: "data={}",
-    }
-  );
-  const getJson = (await getRes.json()) as EDResponse<unknown>;
-  if (getJson.code !== 200) throw new Error("Erreur récupération QCM");
-
-  // 2. POST la réponse
-  const choixB64 = Buffer.from(choix).toString("base64");
-  const postRes = await fetch(
-    `${BASE_URL}/v3/connexion/doubleauth.awp?verbe=post&v=${API_VERSION}`,
-    {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/x-www-form-urlencoded",
-        "User-Agent": USER_AGENT,
-        "X-Token": tempToken,
-        Cookie: `GTK=${gtk}`,
-      },
-      body: `data=${encodeURIComponent(JSON.stringify({ choix: choixB64 }))}`,
-    }
-  );
-  const postJson = (await postRes.json()) as EDResponse<{ cn: string; cv: string }>;
-  if (postJson.code !== 200) throw new Error("Réponse incorrecte au QCM");
-
-  const { cn, cv } = postJson.data;
-
-  // 3. Re-login avec fa
-  const result = await login(identifiant, motdepasse, [{ cn, cv }]);
-  if (result.needDoubleAuth) throw new Error("Double auth toujours requise après QCM");
-  return result.session;
-}
-
 // ── Request helper ───────────────────────────────────────────────────────────
 export async function edRequest<T>(
   path: string,
   bodyData: Record<string, unknown> = {}
 ): Promise<T> {
-  if (!_session) throw new Error("Non connecté. Utilisez d'abord la commande 'login'.");
+  if (!_session) throw new Error("Non connecté. Utilise d'abord login.");
 
-  const res = await fetch(
-    `${BASE_URL}/v3/${path}?verbe=get&v=${API_VERSION}`,
-    {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/x-www-form-urlencoded",
-        "User-Agent": USER_AGENT,
-        "X-Token": _session.token,
-        Cookie: `GTK=${_session.gtkCookie}`,
-      },
-      body: `data=${encodeURIComponent(JSON.stringify(bodyData))}`,
-    } as RequestInit
-  );
+  // BUG FIX : certaines routes ont déjà des query params (?mode=...) — on
+  // ajoute verbe=get et v= sans écraser ce qui existe déjà
+  const separator = path.includes("?") ? "&" : "?";
+  const url = `${BASE_URL}/v3/${path}${separator}verbe=get&v=${API_VERSION}`;
+
+  const headers: Record<string, string> = {
+    "Content-Type": "application/x-www-form-urlencoded",
+    "User-Agent": USER_AGENT,
+    "X-Token": _session.token,
+  };
+  // GTK optionnel (peut être vide si non récupéré au login)
+  if (_session.gtkCookie) {
+    headers["Cookie"] = `GTK=${_session.gtkCookie}`;
+  }
+
+  const res = await fetch(url, {
+    method: "POST",
+    headers,
+    body: `data=${encodeURIComponent(JSON.stringify(bodyData))}`,
+  });
 
   const json = (await res.json()) as EDResponse<T>;
 
