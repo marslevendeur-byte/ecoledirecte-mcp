@@ -116,7 +116,9 @@ export async function login(
     };
   }
 
-  if (json.code === 505) throw new Error("Identifiant ou mot de passe invalide");
+  console.error("[ED LOGIN] code:", json.code, "message:", json.message, "data:", JSON.stringify(json.data)?.slice(0, 200));
+
+  if (json.code === 505) throw new Error(`Identifiant ou mot de passe invalide (505) — réponse ED: "${json.message}" — data: ${JSON.stringify(json.data)?.slice(0,100)}`);
   if (json.code !== 200) throw new Error(`Erreur EcoleDirecte ${json.code}: ${json.message ?? "inconnue"}`);
 
   const account = json.data?.accounts?.[0];
