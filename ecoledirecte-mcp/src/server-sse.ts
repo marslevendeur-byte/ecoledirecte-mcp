@@ -168,3 +168,4 @@ app.listen(PORT, () => {
   console.log(`   HTTP Streamable (stateless) : POST /mcp`);
   console.log(`   SSE legacy                  : GET /sse`);
 });
+

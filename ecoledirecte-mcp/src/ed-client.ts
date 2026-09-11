@@ -1,7 +1,7 @@
 import fetch from "node-fetch";
 
 const BASE_URL = "https://api.ecoledirecte.com";
-const API_VERSION = "7.14.3";
+const API_VERSION = "4.101.4";
 const USER_AGENT =
   "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36";
 

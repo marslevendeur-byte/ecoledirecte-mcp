@@ -89,10 +89,13 @@ interface EDMessage {
 // ── Tool handlers ────────────────────────────────────────────────────────────
 
 export async function handleLogin(args: {
+  cn?: string;
+  cv?: string;
   identifiant: string;
   motdepasse: string;
 }): Promise<string> {
-  const result = await login(args.identifiant, args.motdepasse);
+  const fa = args.cn && args.cv ? [{ cn: args.cn, cv: args.cv }] : undefined;
+  const result = await login(args.identifiant, args.motdepasse, fa);
 
   if (result.needDoubleAuth) {
     let msg = "⚠️ EcoleDirecte demande une double authentification.\n\n";

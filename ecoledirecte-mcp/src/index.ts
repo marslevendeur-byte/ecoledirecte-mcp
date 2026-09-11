@@ -25,6 +25,8 @@ server.tool(
   {
     identifiant: z.string().describe("Identifiant EcoleDirecte"),
     motdepasse: z.string().describe("Mot de passe EcoleDirecte"),
+    cn: z.string().optional().describe("Token double auth cn (depuis les cookies du navigateur)"),
+    cv: z.string().optional().describe("Token double auth cv (depuis les cookies du navigateur)"),
   },
   async (args) => ({
     content: [{ type: "text", text: await handleLogin(args) }],
@@ -138,3 +140,4 @@ server.tool(
 const transport = new StdioServerTransport();
 await server.connect(transport);
 console.error("✅ EcoleDirecte MCP server démarré (stdio)");
+
