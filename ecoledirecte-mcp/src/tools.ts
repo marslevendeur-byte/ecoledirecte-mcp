@@ -1,4 +1,4 @@
-import { login, edRequest, getSession, clearSession } from "./ed-client.js";
+import { login, edRequest, getSession, clearSession, setSession } from "./ed-client.js";
 import {
   decodeED,
   formatDate,
@@ -451,3 +451,19 @@ export async function handleMoyennes(): Promise<string> {
 
   return out.trim();
 }
+
+export async function handleSetToken(args: {
+  token: string;
+  student_id: number;
+  student_name?: string;
+  class_name?: string;
+}): Promise<string> {
+  const s = setSession(
+    args.token,
+    args.student_id,
+    args.student_name ?? "Marcellin Leclercq",
+    args.class_name ?? "Classe inconnue"
+  );
+  return `✅ Session injectée pour **${s.studentName}** (ID: ${s.studentId})`;
+}
+

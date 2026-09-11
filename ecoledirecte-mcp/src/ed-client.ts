@@ -31,6 +31,12 @@ export function clearSession(): void {
   _session = null;
 }
 
+// ── Injection directe de session (bypass login) ──────────────────────────────
+export function setSession(token: string, studentId: number, studentName: string, className: string): Session {
+  _session = { token, studentId, studentName, className, gtkCookie: "" };
+  return _session;
+}
+
 // ── Cookie helpers ───────────────────────────────────────────────────────────
 function extractCookie(setCookieHeaders: string[], name: string): string {
   for (const header of setCookieHeaders) {
@@ -184,4 +190,5 @@ export async function edRequest<T>(
 
   return json.data as T;
 }
+
 
