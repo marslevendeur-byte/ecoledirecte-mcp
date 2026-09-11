@@ -68,13 +68,14 @@ export async function login(
 ): Promise<{ session: Session; needDoubleAuth: boolean; question?: string; propositions?: string[] }> {
   const gtk = await fetchGTK();
 
+  const faWithUniq = fa?.map(f => ({ ...f, uniq: false }));
   const body: Record<string, unknown> = {
     identifiant,
     motdepasse,
-    isRelogin: false,
+    isReLogin: false,
     uuid: "",
   };
-  if (fa && fa.length > 0) body.fa = fa;
+  if (faWithUniq && faWithUniq.length > 0) body.fa = faWithUniq;
 
   const headers: Record<string, string> = {
     "Content-Type": "application/x-www-form-urlencoded",
@@ -183,3 +184,4 @@ export async function edRequest<T>(
 
   return json.data as T;
 }
+
