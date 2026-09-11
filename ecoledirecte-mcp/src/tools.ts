@@ -82,6 +82,8 @@ interface EDMessage {
   date: string;
   read: boolean;
   content?: string;
+  // BUG FIX : ED peut retourner "read" ou "lu"
+  lu?: boolean;
 }
 
 // ── Tool handlers ────────────────────────────────────────────────────────────
@@ -93,14 +95,12 @@ export async function handleLogin(args: {
   const result = await login(args.identifiant, args.motdepasse);
 
   if (result.needDoubleAuth) {
-    let msg =
-      "⚠️ EcoleDirecte demande une vérification double authentification.\n\n";
+    let msg = "⚠️ EcoleDirecte demande une double authentification.\n\n";
     if (result.question) msg += `**Question :** ${result.question}\n\n`;
     if (result.propositions?.length) {
       msg += "**Propositions :**\n";
       result.propositions.forEach((p, i) => (msg += `${i + 1}. ${p}\n`));
-      msg +=
-        "\nUtilise l'outil `submit_doubleauth` avec ta réponse pour finaliser la connexion.";
+      msg += "\nRéponds avec le numéro de ta réponse.";
     }
     return msg;
   }
@@ -131,16 +131,19 @@ export async function handleEmploiDuTemps(args: {
   const dateDebut = args.date_debut ?? start;
   const dateFin = args.date_fin ?? end;
 
+  // BUG FIX : route correcte = eleves (minuscule), pas E/
   const cours = await edRequest<EDCours[]>(
-    `E/${s.studentId}/emploidutemps.awp`,
+    `eleves/${s.studentId}/emploidutemps.awp`,
     { dateDebut, dateFin, avecTrous: false }
   );
 
-  if (!cours.length) return `📅 Aucun cours du ${formatDate(dateDebut)} au ${formatDate(dateFin)}.`;
+  // BUG FIX : la réponse peut ne pas être un tableau directement
+  const list = Array.isArray(cours) ? cours : [];
 
-  // Groupe par jour
+  if (!list.length) return `📅 Aucun cours du ${formatDate(dateDebut)} au ${formatDate(dateFin)}.`;
+
   const byDay = new Map<string, EDCours[]>();
-  for (const c of cours) {
+  for (const c of list) {
     const day = c.start_date.split(" ")[0];
     if (!byDay.has(day)) byDay.set(day, []);
     byDay.get(day)!.push(c);
@@ -150,12 +153,10 @@ export async function handleEmploiDuTemps(args: {
 
   for (const [day, classes] of [...byDay.entries()].sort()) {
     out += `### ${formatDate(day)}\n`;
-    for (const c of classes.sort((a, b) =>
-      a.start_date.localeCompare(b.start_date)
-    )) {
+    for (const c of classes.sort((a, b) => a.start_date.localeCompare(b.start_date))) {
       const annule = c.isAnnule ? " ~~annulé~~" : "";
       const dispense = c.dispense ? " *(dispensé)*" : "";
-      out += `- **${formatTimeSlot(c.start_date, c.end_date)}** — ${c.text}${annule}${dispense}`;
+      out += `- **${formatTimeSlot(c.start_date, c.end_date)}** — ${c.text || c.matiere}${annule}${dispense}`;
       if (c.salle) out += ` · salle ${c.salle}`;
       if (c.prof) out += ` · ${c.prof}`;
       out += "\n";
@@ -166,27 +167,26 @@ export async function handleEmploiDuTemps(args: {
   return out.trim();
 }
 
-export async function handleDevoirs(args: {
-  date?: string;
-}): Promise<string> {
+export async function handleDevoirs(args: { date?: string }): Promise<string> {
   const s = getSession();
   if (!s) throw new Error("Non connecté. Utilise d'abord login.");
 
   const today = new Date().toISOString().split("T")[0];
 
   if (args.date) {
-    // Devoirs détaillés pour un jour précis
     const data = await edRequest<{
       date: string;
       matieres: EDDevoirDetail[];
     }>(`Eleves/${s.studentId}/cahierdetexte/${args.date}.awp`);
 
-    if (!data.matieres?.length)
+    // BUG FIX : matieres peut être null/undefined
+    const matieres = data?.matieres ?? [];
+    if (!matieres.length)
       return `📚 Aucun devoir pour le ${formatDate(args.date)}.`;
 
     let out = `📚 **Devoirs pour le ${formatDate(args.date)}**\n\n`;
 
-    for (const m of data.matieres) {
+    for (const m of matieres) {
       if (!m.aFaire) continue;
       const af = m.aFaire;
       out += `### ${m.matiere}`;
@@ -197,22 +197,25 @@ export async function handleDevoirs(args: {
       out += "\n";
       if (af.effectue) out += "✅ Marqué comme fait\n";
       if (af.rendreEnLigne) out += "📤 *À rendre en ligne*\n";
-      if (af.documents.length) {
-        out += `📎 Pièces jointes : ${af.documents.map((d) => d.libelle).join(", ")}\n`;
+      if (af.documents?.length) {
+        out += `📎 ${af.documents.map((d) => d.libelle).join(", ")}\n`;
       }
       out += "\n";
     }
 
-    return out.trim();
+    return out.trim() || `📚 Aucun devoir à faire pour le ${formatDate(args.date)}.`;
   }
 
-  // Liste synthétique de tous les devoirs à venir
+  // Liste synthétique
   const data = await edRequest<Record<string, EDDevoirBrief[]>>(
     `Eleves/${s.studentId}/cahierdetexte.awp`
   );
 
+  // BUG FIX : data peut être null ou pas un objet
+  if (!data || typeof data !== "object") return "📚 Aucun devoir à venir ! 🎉";
+
   const entries = Object.entries(data)
-    .filter(([date]) => date >= today)
+    .filter(([date, devoirs]) => date >= today && Array.isArray(devoirs) && devoirs.length > 0)
     .sort(([a], [b]) => a.localeCompare(b));
 
   if (!entries.length) return "📚 Aucun devoir à venir ! 🎉";
@@ -229,7 +232,7 @@ export async function handleDevoirs(args: {
     out += "\n";
   }
 
-  out += `\n*Utilise \`get_devoirs\` avec une date (ex: \`${entries[0]?.[0]}\`) pour voir le détail d'un jour.*`;
+  out += `\n*Dis-moi une date (ex: "${entries[0]?.[0]}") pour voir le détail.*`;
 
   return out.trim();
 }
@@ -246,9 +249,9 @@ export async function handleNotes(args: {
     notes: EDNote[];
   }>(`eleves/${s.studentId}/notes.awp`, { anneeScolaire: "" });
 
-  const { periodes, notes } = data;
+  const periodes = data?.periodes ?? [];
+  const notes = data?.notes ?? [];
 
-  // Filtre période
   let periodeActive: EDPeriode | undefined;
   if (args.periode) {
     periodeActive = periodes.find(
@@ -257,25 +260,14 @@ export async function handleNotes(args: {
         p.periode.toLowerCase().includes(args.periode!.toLowerCase())
     );
   } else {
-    // Période en cours : la dernière non clôturée, sinon la dernière
     periodeActive =
-      periodes
-        .filter((p) => !p.annuel && !p.cloture)
-        .sort((a, b) => a.codePeriode.localeCompare(b.codePeriode))
-        .at(-1) ??
-      periodes
-        .filter((p) => !p.annuel)
-        .sort((a, b) => a.codePeriode.localeCompare(b.codePeriode))
-        .at(-1);
+      periodes.filter((p) => !p.annuel && !p.cloture).at(-1) ??
+      periodes.filter((p) => !p.annuel).at(-1);
   }
 
   if (!periodeActive) return "❌ Aucune période trouvée.";
 
-  const filteredNotes = notes.filter(
-    (n) => n.codePeriode === periodeActive!.codePeriode
-  );
-
-  // Filtre matière optionnel
+  const filteredNotes = notes.filter((n) => n.codePeriode === periodeActive!.codePeriode);
   const notesMatiere = args.matiere
     ? filteredNotes.filter((n) =>
         n.libelleMatiere.toLowerCase().includes(args.matiere!.toLowerCase())
@@ -283,20 +275,15 @@ export async function handleNotes(args: {
     : filteredNotes;
 
   if (!notesMatiere.length)
-    return `📊 Aucune note pour la période "${periodeActive.periode}"${args.matiere ? ` en ${args.matiere}` : ""}.`;
+    return `📊 Aucune note pour "${periodeActive.periode}"${args.matiere ? ` en ${args.matiere}` : ""}.`;
 
   let out = `📊 **Notes — ${periodeActive.periode}**${args.matiere ? ` · ${args.matiere}` : ""}\n\n`;
 
-  // Moyenne générale de la période
   const moyGen = periodeActive.ensembleMatieres?.moyenneGenerale;
   if (moyGen && !args.matiere) {
-    out += `**Moyenne générale : ${moyGen}/20**`;
-    const moyClasse = periodeActive.ensembleMatieres?.disciplines?.[0]?.moyenneClasse;
-    if (moyClasse) out += ` *(classe : ${moyClasse}/20)*`;
-    out += "\n\n";
+    out += `**Moyenne générale : ${moyGen}/20**\n\n`;
   }
 
-  // Groupe par matière
   const byMatiere = new Map<string, EDNote[]>();
   for (const n of notesMatiere.sort(
     (a, b) => new Date(b.date).getTime() - new Date(a.date).getTime()
@@ -306,32 +293,27 @@ export async function handleNotes(args: {
   }
 
   for (const [matiere, mNotes] of byMatiere) {
-    // Moyenne de la matière dans la période
     const discipInfo = periodeActive.ensembleMatieres?.disciplines?.find(
       (d) => d.discipline === matiere
     );
     out += `### ${matiere}`;
-    if (discipInfo) out += ` *(moy. : ${discipInfo.moyenne}/20)*`;
+    if (discipInfo?.moyenne) out += ` *(moy. ED : ${discipInfo.moyenne}/20)*`;
     out += "\n";
 
     for (const n of mNotes) {
       const val = parseNote(n.valeur);
       const sur = parseNote(n.noteSur) ?? 20;
-      const valDisplay =
-        val !== null ? `**${n.valeur}/${n.noteSur}**` : n.valeur;
-      const moy20 = val !== null ? ` *(= ${((val / sur) * 20).toFixed(2)}/20)*` : "";
+      const valDisplay = val !== null ? `**${n.valeur}/${n.noteSur}**` : n.valeur;
+      const moy20 = val !== null ? ` *(${((val / sur) * 20).toFixed(2)}/20)*` : "";
       out += `- ${formatDate(n.date)} — ${n.devoir} : ${valDisplay}${moy20}`;
       if (n.commentaire) out += ` — *${n.commentaire}*`;
       out += "\n";
     }
 
-    // Calcul de moyenne perso pour cette matière
-    const moyCalc = calcMoyenne(mNotes);
-    out += `*Moyenne calculée : ${moyCalc}/20*\n\n`;
+    out += `*Moyenne calculée : ${calcMoyenne(mNotes)}/20*\n\n`;
   }
 
-  // Liste des périodes dispo
-  out += `---\n*Périodes disponibles : ${periodes
+  out += `---\n*Périodes : ${periodes
     .filter((p) => !p.annuel)
     .map((p) => `${p.periode} (${p.codePeriode})`)
     .join(", ")}*`;
@@ -346,18 +328,33 @@ export async function handleMessages(args: {
   const s = getSession();
   if (!s) throw new Error("Non connecté. Utilise d'abord login.");
 
+  if (args.id) return handleMessageDetail({ id: args.id });
+
   const limit = Math.min(args.limit ?? 10, 50);
 
-  const data = await edRequest<{
-    messages: { received: EDMessage[] };
-  }>(
+  // BUG FIX : la route messages nécessite le paramètre anneeMessages
+  const currentYear = new Date().getFullYear();
+  const schoolYear = new Date().getMonth() >= 8
+    ? `${currentYear}-${currentYear + 1}`
+    : `${currentYear - 1}-${currentYear}`;
+
+  const data = await edRequest<unknown>(
     `eleves/${s.studentId}/messages.awp`,
-    {}
+    { anneeMessages: schoolYear }
   );
 
-  const received: EDMessage[] = Array.isArray(data)
-    ? (data as unknown as { received: EDMessage[] }).received ?? (data as unknown as EDMessage[])
-    : data?.messages?.received ?? [];
+  // BUG FIX : la structure de retour varie — on cherche received partout
+  let received: EDMessage[] = [];
+  if (Array.isArray(data)) {
+    received = data as EDMessage[];
+  } else if (data && typeof data === "object") {
+    const d = data as Record<string, unknown>;
+    if (Array.isArray(d["received"])) received = d["received"] as EDMessage[];
+    else if (d["messages"] && typeof d["messages"] === "object") {
+      const m = d["messages"] as Record<string, unknown>;
+      if (Array.isArray(m["received"])) received = m["received"] as EDMessage[];
+    }
+  }
 
   if (!received.length) return "📬 Aucun message reçu.";
 
@@ -368,12 +365,12 @@ export async function handleMessages(args: {
   let out = `📬 **Messages reçus** (${sorted.length} sur ${received.length})\n\n`;
 
   for (const m of sorted) {
-    const lu = m.read ? "" : "🔵 ";
-    out += `${lu}**[${m.id}]** ${formatDate(m.date)} — *${m.from?.name ?? "Inconnu"}*\n`;
+    const lu = m.read || m.lu;
+    out += `${lu ? "" : "🔵 "}**[${m.id}]** ${formatDate(m.date)} — *${m.from?.name ?? "Inconnu"}*\n`;
     out += `> ${m.objet ?? "(sans objet)"}\n\n`;
   }
 
-  out += `\n*Utilise \`get_messages\` avec \`id\` pour lire un message complet.*`;
+  out += `*Dis-moi l'ID d'un message pour le lire en entier.*`;
 
   return out.trim();
 }
@@ -383,18 +380,21 @@ export async function handleMessageDetail(args: { id: number }): Promise<string>
   if (!s) throw new Error("Non connecté. Utilise d'abord login.");
 
   const currentYear = new Date().getFullYear();
-  const schoolYear = `${currentYear - 1}-${currentYear}`;
+  const schoolYear = new Date().getMonth() >= 8
+    ? `${currentYear}-${currentYear + 1}`
+    : `${currentYear - 1}-${currentYear}`;
 
+  // BUG FIX : le ?mode=destinataire était ajouté dans le path, ce qui
+  // cassait la construction de l'URL dans edRequest (double ?)
   const data = await edRequest<EDMessage>(
-    `eleves/${s.studentId}/messages/${args.id}.awp?mode=destinataire`,
-    { anneeMessages: schoolYear }
+    `eleves/${s.studentId}/messages/${args.id}.awp`,
+    { anneeMessages: schoolYear, mode: "destinataire" }
   );
 
   let out = `📨 **Message #${args.id}**\n\n`;
   out += `**De :** ${data.from?.name ?? "Inconnu"}\n`;
   out += `**Date :** ${formatDate(data.date)}\n`;
-  out += `**Objet :** ${data.objet ?? "(sans objet)"}\n\n`;
-  out += "---\n\n";
+  out += `**Objet :** ${data.objet ?? "(sans objet)"}\n\n---\n\n`;
   out += data.content ? decodeED(data.content) : "*(contenu vide)*";
 
   return out.trim();
@@ -409,12 +409,13 @@ export async function handleMoyennes(): Promise<string> {
     notes: EDNote[];
   }>(`eleves/${s.studentId}/notes.awp`, { anneeScolaire: "" });
 
-  const { periodes, notes } = data;
+  const periodes = data?.periodes ?? [];
+  const notes = data?.notes ?? [];
   const periodesCourantes = periodes.filter((p) => !p.annuel);
 
   if (!periodesCourantes.length) return "❌ Aucune période trouvée.";
 
-  let out = `📈 **Récapitulatif des moyennes — ${s.studentName}**\n\n`;
+  let out = `📈 **Moyennes — ${s.studentName}**\n\n`;
 
   for (const periode of periodesCourantes) {
     out += `## ${periode.periode}${periode.cloture ? " *(clôturée)*" : ""}\n`;
@@ -425,20 +426,20 @@ export async function handleMoyennes(): Promise<string> {
     const disciplines = periode.ensembleMatieres?.disciplines ?? [];
     if (disciplines.length) {
       for (const d of disciplines) {
-        if (!d.moyenne || d.moyenne === "") continue;
+        if (!d.moyenne) continue;
         out += `- **${d.discipline}** : ${d.moyenne}/20`;
         if (d.moyenneClasse) out += ` *(classe : ${d.moyenneClasse}/20)*`;
         out += "\n";
       }
     } else {
-      // Calcul maison si ED ne donne pas les moyennes par matière
+      // Calcul maison
       const notesP = notes.filter((n) => n.codePeriode === periode.codePeriode);
-      const byMatiere = new Map<string, EDNote[]>();
+      const byMat = new Map<string, EDNote[]>();
       for (const n of notesP) {
-        if (!byMatiere.has(n.libelleMatiere)) byMatiere.set(n.libelleMatiere, []);
-        byMatiere.get(n.libelleMatiere)!.push(n);
+        if (!byMat.has(n.libelleMatiere)) byMat.set(n.libelleMatiere, []);
+        byMat.get(n.libelleMatiere)!.push(n);
       }
-      for (const [mat, ns] of byMatiere) {
+      for (const [mat, ns] of byMat) {
         out += `- **${mat}** : ${calcMoyenne(ns)}/20\n`;
       }
     }
